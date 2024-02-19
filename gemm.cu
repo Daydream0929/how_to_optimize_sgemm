@@ -1,29 +1,37 @@
 #include <iostream>
 #include "error.cuh"
 
+// 行主序
+#define A(i, j) a[(i) * lda + (j)]
+#define B(i, j) b[(i) * ldb + (j)]
+#define C(i, j) c[(i) * ldc + (j)]
+
 // A[M][K] B[K][N] C[M][N]
-const int M = 1024 * 8;
-const int K = 1024 * 8;
-const int N = 1024 * 8;
+const int M = 128;
+const int K = 128;
+const int N = 128;
 
 const int ITERATION = 50;
 
-const dim3 threads_per_block = {128};
-const dim3 blocks_per_grid = {128};
+// block_size and grid_size
+const dim3 threads_per_block = {16, 16, 1};
+const dim3 blocks_per_grid = {M / threads_per_block.x, N / threads_per_block.y, 1};
+
 
 // 行主序
-__global__ void matrixMul0(const float *A, const float *B, float *C, int M, int N, int K)
+__global__ void matrixMul0(const float *a, const float *b, float *c, int M, int N, int K)
 {
-    int tx = blockDim.x * blockIdx.x + threadIdx.x;
-    int ty = blockDim.y * blockIdx.y + threadIdx.y;
-    if (tx < M && ty < N)
+    const int col = blockDim.x * blockIdx.x + threadIdx.x;
+    const int row = blockDim.y * blockIdx.y + threadIdx.y;
+    const int lda = K, ldb = N, ldc = N;
+    if (col < N && row < M)
     {
-        float c = 0;
-        for (int i = 0; i < K; i++)
+        float value = 0;
+        for (int k = 0; k < K; k++) 
         {
-            c += A[ty * K + i] * B[i * N + tx];
+            value += A(row, k) * B(k, col);
         }
-        C[ty * N + tx] = c;
+        C(row, col) = value;
     }
 }
 
@@ -35,9 +43,22 @@ void test_matrixMat0()
     float *h_c = (float *)malloc(sizeof(float) * M * N);
 
     for (int i = 0; i < M * K; i++)
-        h_a[i] = i % 17;
+        h_a[i] = i % 7;
     for (int i = 0; i < K * N; i++)
-        h_b[i] = i % 17;
+        h_b[i] = i % 7;
+
+    // test device_c result
+    float *test_c = (float *)malloc(sizeof(float) * M * N);
+    for (int i = 0; i < M; i ++) {
+        for (int j = 0; j < N; j ++) {
+            float value = 0;
+            for (int k = 0; k < K; k ++) {
+                //test_c[i][j] += h_a[i][k] * h_b[k][j]
+                value += h_a[i * K + k] * h_b[k * N + j];
+            }
+            test_c[i * N + j] += value;
+        }
+    }
 
     // allocate device for A, B, C
     float *d_a;
@@ -76,6 +97,12 @@ void test_matrixMat0()
         {
             t_sum += elapsed_time;
             t2_sum += elapsed_time * elapsed_time;
+        } 
+        else
+        {
+            for (int i = 0; i < M * N; i ++) {
+                std::cout << i << " h_c : " << h_c[i] << " test_c : " << test_c[i] << std::endl;
+            }
         }
 
         CHECK(cudaEventDestroy(start));
