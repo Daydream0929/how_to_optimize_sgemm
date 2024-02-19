@@ -9,15 +9,20 @@
 #define C(i, j) c[(i) * ldc + (j)]
 
 // A[M][K] B[K][N] C[M][N]
-const int M = 2048;
-const int K = 2048;
-const int N = 2048;
+const int M = 1024 * 4;
+const int K = 1024 * 4;
+const int N = 1024 * 4;
 
-const int ITERATION = 50;
+// TILE_WIDTH
+const int TILE_M = 16;
+const int TILE_K = 16;
+const int TILE_N = 16;
+
+const int ITERATION = 10;
 
 // block_size and grid_size
 const dim3 threads_per_block = {16, 16, 1};
-const dim3 blocks_per_grid = {M / threads_per_block.x, N / threads_per_block.y, 1};
+const dim3 blocks_per_grid = {N / threads_per_block.x, M / threads_per_block.y, 1};
 
 
 // kernel 行主序
@@ -37,13 +42,42 @@ __global__ void matrixMul0(const float *a, const float *b, float *c, int M, int 
     }
 }
 
-void test_matrixMat0()
+// global memory -----> shared memory
+__global__ void matrixMul1(const float *a, const float *b, float *c, int M, int N, int K)
+{
+    __shared__ float Tiled_A[TILE_M][TILE_K];
+    __shared__ float Tiled_B[TILE_K][TILE_N];
+
+    const int col = blockDim.x * blockIdx.x + threadIdx.x;
+    const int row = blockDim.y * blockIdx.y + threadIdx.y;
+    const int lda = K, ldb = N, ldc = N;
+    if (col < N && row < M)
+    {
+        float value = 0;
+        for (int idx_tile = 0; idx_tile < K / TILE_K; idx_tile ++) 
+        {
+            // load Tiled_A && Tiled_B from global_memory to shared_memory
+            Tiled_A[threadIdx.y][threadIdx.x] = A(row, idx_tile * TILE_K + threadIdx.x);
+            Tiled_B[threadIdx.y][threadIdx.x] = B(idx_tile * TILE_K + threadIdx.y, col);    
+            __syncthreads(); // sync
+            for (int idx_k = 0; idx_k < TILE_K; idx_k ++) 
+            {
+                value += Tiled_A[threadIdx.y][idx_k] * Tiled_B[idx_k][threadIdx.x];
+            }
+            __syncthreads();
+        }
+        C(row, col) = value;
+    }
+}
+
+void test_matrixMat()
 {
     // allocate host for A, B, C
     float *h_a = (float *)malloc(sizeof(float) * M * K);
     float *h_b = (float *)malloc(sizeof(float) * K * N);
-    float *h_c = (float *)malloc(sizeof(float) * M * N);
-    float *h_c1 = (float *)malloc(sizeof(float) * M * N); // cublas
+    float *h_cC = (float *)malloc(sizeof(float) * M * N); // cublas
+    float *h_c0 = (float *)malloc(sizeof(float) * M * N); // matrixMul0
+    float *h_c1 = (float *)malloc(sizeof(float) * M * N); // matrixMul1
 
     for (int i = 0; i < M * K; i++)
         h_a[i] = i % 7;
@@ -71,6 +105,7 @@ void test_matrixMat0()
     float *d_c;
     CHECK(cudaMalloc((void **)&d_c, sizeof(float) * M * N));
 
+    // -------------------------- matrix0 -------------------------- //
     // copy h_a h_b for d_a d_b
     CHECK(cudaMemcpy(d_a, h_a, sizeof(float) * M * K, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_b, h_b, sizeof(float) * K * N, cudaMemcpyHostToDevice));
@@ -88,7 +123,7 @@ void test_matrixMat0()
         // MatrixMul0 kernel
         matrixMul0<<<blocks_per_grid, threads_per_block>>>(d_a, d_b, d_c, M, N, K);
 
-        CHECK(cudaMemcpy(h_c, d_c, sizeof(float) * M * N, cudaMemcpyDeviceToHost)); // 隐式同步
+        CHECK(cudaMemcpy(h_c0, d_c, sizeof(float) * M * N, cudaMemcpyDeviceToHost)); // 隐式同步
 
         CHECK(cudaEventRecord(stop));
         CHECK(cudaEventSynchronize(stop));
@@ -104,7 +139,7 @@ void test_matrixMat0()
         else
         {
             for (int i = 0; i < M * N; i ++) {
-                if (abs(h_c[i] - test_c[i]) > 1e-5) {
+                if (abs(h_c0[i] - test_c[i]) > 1e-5) {
                     printf("MatrixMul0 Result Error!\n");
                     break;
                 }
@@ -120,7 +155,67 @@ void test_matrixMat0()
     printf(" ----- MatrixMul0 ----- \n");
     printf("Time = %g +- %g ms.\n\n", t_ave, t_err);
 
+    // -------------------------- matrix0 -------------------------- //
 
+
+
+    // --------------------------  matrix1 -------------------------- //
+
+    // copy h_a h_b for d_a d_b
+    CHECK(cudaMemcpy(d_a, h_a, sizeof(float) * M * K, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_b, h_b, sizeof(float) * K * N, cudaMemcpyHostToDevice));
+    // record the MatrixMul1 time
+    t_sum = 0, t2_sum = 0;
+    for (int repeat = 0; repeat <= ITERATION; repeat++)
+    {
+        cudaEvent_t start, stop;
+        CHECK(cudaEventCreate(&start));
+        CHECK(cudaEventCreate(&stop));
+        CHECK(cudaEventRecord(start));
+        cudaEventQuery(start);
+
+        // MatrixMul0 kernel
+        matrixMul1<<<blocks_per_grid, threads_per_block>>>(d_a, d_b, d_c, M, N, K);
+
+        CHECK(cudaMemcpy(h_cC, d_c, sizeof(float) * M * N, cudaMemcpyDeviceToHost)); // 隐式同步
+
+        CHECK(cudaEventRecord(stop));
+        CHECK(cudaEventSynchronize(stop));
+        float elapsed_time;
+        CHECK(cudaEventElapsedTime(&elapsed_time, start, stop));
+        printf("Time = %g ms.\n", elapsed_time);
+
+        if (repeat > 0)
+        {
+            t_sum += elapsed_time;
+            t2_sum += elapsed_time * elapsed_time;
+        } 
+        else
+        {
+            for (int i = 0; i < M * N; i ++) {
+                if (abs(h_cC[i] - test_c[i]) > 1e-5) {
+                    printf("MatrixMul1 Result Error!\n");
+                    break;
+                }
+            }
+        }
+
+        CHECK(cudaEventDestroy(start));
+        CHECK(cudaEventDestroy(stop));
+    }
+
+    const float t_ave3 = t_sum / ITERATION;
+    const float t_err3 = sqrt(t2_sum / ITERATION - t_ave3 * t_ave3);
+    printf(" ----- MatrixMul1 ----- \n");
+    printf("Time = %g +- %g ms.\n\n", t_ave3, t_err3);
+
+    // --------------------------  matrix1 -------------------------- //
+
+
+
+
+
+    // -------------------------- cublas -------------------------- //
     // copy h_a h_b for d_a d_b
     CHECK(cudaMemcpy(d_a, h_a, sizeof(float) * M * K, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_b, h_b, sizeof(float) * K * N, cudaMemcpyHostToDevice));
@@ -176,10 +271,15 @@ void test_matrixMat0()
     printf(" ----- cublas ----- \n");
     printf("Time = %g +- %g ms.\n\n", t_ave2, t_err2);
 
+    // -------------------------- cublas -------------------------- //
+
+
+
     // Free Memory
     free(h_a);
     free(h_b);
-    free(h_c);
+    free(h_cC);
+    free(h_c0);
     free(h_c1);
     CHECK(cudaFree(d_a));
     CHECK(cudaFree(d_b));
@@ -190,7 +290,7 @@ void test_matrixMat0()
 
 int main()
 {
-    test_matrixMat0();
+    test_matrixMat();
 
     return 0;
 }
