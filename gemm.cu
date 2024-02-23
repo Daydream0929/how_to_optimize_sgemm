@@ -2,6 +2,7 @@
 #include "error.cuh"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
 
 // 行主序
 #define A(i, j) a[(i) * lda + (j)]
@@ -17,6 +18,8 @@ const int N = 1024 * 4;
 const int TILE_M = 16;
 const int TILE_K = 16;
 const int TILE_N = 16;
+
+const int BLOCK_SIZE = 16;
 
 const int ITERATION = 10;
 
@@ -70,6 +73,30 @@ __global__ void matrixMul1(const float *a, const float *b, float *c, int M, int 
     }
 }
 
+__global__ void matrixMul2(const float *a, const float *b, float *c, int M, int N, int K)
+{
+    __shared__ float Mds[BLOCK_SIZE][BLOCK_SIZE];
+    __shared__ float Nds[BLOCK_SIZE][BLOCK_SIZE];
+    float value = 0;
+    cooperative_groups::thread_block g = cooperative_groups::this_thread_block();
+    int row = g.thread_index().x + g.group_index().x * BLOCK_SIZE;
+    int col = g.thread_index().y + g.group_index().y * BLOCK_SIZE;
+    int tx = g.thread_index().x;
+    int ty = g.thread_index().y;
+    for (int i = 0; i < N / BLOCK_SIZE; i ++) 
+    {
+        Mds[tx][ty] = a[row * K + ty + i * BLOCK_SIZE];
+        Nds[tx][ty] = b[col + (tx + i * BLOCK_SIZE) * N];
+        g.sync();
+        for (int j = 0; j < BLOCK_SIZE; j ++) 
+        {
+            value += Mds[tx][j] * Nds[j][ty];
+            g.sync();
+        }
+    }
+    c[row * N + col] = value;
+}
+
 void test_matrixMat()
 {
     // allocate host for A, B, C
@@ -78,6 +105,7 @@ void test_matrixMat()
     float *h_cC = (float *)malloc(sizeof(float) * M * N); // cublas
     float *h_c0 = (float *)malloc(sizeof(float) * M * N); // matrixMul0
     float *h_c1 = (float *)malloc(sizeof(float) * M * N); // matrixMul1
+    float *h_c2 = (float *)malloc(sizeof(float) * M * N); // matrixMuk2
 
     for (int i = 0; i < M * K; i++)
         h_a[i] = i % 7;
@@ -275,12 +303,67 @@ void test_matrixMat()
 
 
 
+
+    // --------------------------  matrix2 -------------------------- //
+
+    // copy h_a h_b for d_a d_b
+    CHECK(cudaMemcpy(d_a, h_a, sizeof(float) * M * K, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_b, h_b, sizeof(float) * K * N, cudaMemcpyHostToDevice));
+    // record the MatrixMul1 time
+    t_sum = 0, t2_sum = 0;
+    for (int repeat = 0; repeat <= ITERATION; repeat++)
+    {
+        cudaEvent_t start, stop;
+        CHECK(cudaEventCreate(&start));
+        CHECK(cudaEventCreate(&stop));
+        CHECK(cudaEventRecord(start));
+        cudaEventQuery(start);
+
+        // MatrixMul0 kernel
+        matrixMul2<<<blocks_per_grid, threads_per_block>>>(d_a, d_b, d_c, M, N, K);
+
+        CHECK(cudaMemcpy(h_c2, d_c, sizeof(float) * M * N, cudaMemcpyDeviceToHost)); // 隐式同步
+
+        CHECK(cudaEventRecord(stop));
+        CHECK(cudaEventSynchronize(stop));
+        float elapsed_time;
+        CHECK(cudaEventElapsedTime(&elapsed_time, start, stop));
+        printf("Time = %g ms.\n", elapsed_time);
+
+        if (repeat > 0)
+        {
+            t_sum += elapsed_time;
+            t2_sum += elapsed_time * elapsed_time;
+        } 
+        else
+        {
+            for (int i = 0; i < M * N; i ++) {
+                if (abs(h_c2[i] - test_c[i]) > 1e-5) {
+                    printf("MatrixMul1 Result Error!\n");
+                    break;
+                }
+            }
+        }
+
+        CHECK(cudaEventDestroy(start));
+        CHECK(cudaEventDestroy(stop));
+    }
+
+    const float t_ave4 = t_sum / ITERATION;
+    const float t_err4 = sqrt(t2_sum / ITERATION - t_ave4 * t_ave4);
+    printf(" ----- MatrixMul2 ----- \n");
+    printf("Time = %g +- %g ms.\n\n", t_ave4, t_err4);
+
+    // --------------------------  matrix2 -------------------------- //
+
+
     // Free Memory
     free(h_a);
     free(h_b);
     free(h_cC);
     free(h_c0);
     free(h_c1);
+    free(h_c2);
     CHECK(cudaFree(d_a));
     CHECK(cudaFree(d_b));
     CHECK(cudaFree(d_c));
