@@ -53,8 +53,9 @@ __global__ void mySgemmV1Aligned(
     const int ty = threadIdx.y;
     const int tid = ty * blockDim.x + tx;
 
-    __shared__ float s_a[BM][BK];
-    __shared__ float s_b[BK][BN];
+    __shared__ float s_a[BM][BK];   // 128*8=1024
+    __shared__ float s_b[BK][BN];   // 8*128=1024
+    // 256个threads 每个threads负责load矩阵a的四个元素和矩阵b的四个元素
 
     float r_c[TM][TN] = {0.0};
 
@@ -66,7 +67,10 @@ __global__ void mySgemmV1Aligned(
     int load_a_gmem_m = by * BM + load_a_smem_m;
     int load_b_gmem_n = bx * BN + load_b_smem_n;
 
-    for (int bk = 0; bk < (K + BK - 1) / BK; bk++) {
+    // 每个thread都负责 K / BK 次循环      ------------->       每个循环负责一个BM*BK BK*BN 两个矩阵相乘
+    // 128*K X K*128                   ------------->       K/8 个 {128*8 X 8*128 } 
+    for (int bk = 0; bk < K / BK; bk++) {
+        // 将所需要的global元素load到分配的shared_memory中
         int load_a_gmem_k = bk * BK + load_a_smem_k;
         int load_a_gmem_addr = OFFSET(load_a_gmem_m, load_a_gmem_k, K);
         FLOAT4(s_a[load_a_smem_m][load_a_smem_k]) = FLOAT4(a[load_a_gmem_addr]);
@@ -76,6 +80,7 @@ __global__ void mySgemmV1Aligned(
 
         __syncthreads();
 
+        // TM*BK  BK*TN 两个矩阵相乘
         #pragma unroll
         for (int k = 0; k < BK; k++) {
             #pragma unroll

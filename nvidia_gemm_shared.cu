@@ -1,8 +1,8 @@
 #include "error.cuh"
 
-const int M = 1024 * 4;
-const int K = 1024 * 4;
-const int N = 1024 * 4;
+const int M = 1024;
+const int K = 1024;
+const int N = 1024;
 
 const int ITERATION = 10;
 
