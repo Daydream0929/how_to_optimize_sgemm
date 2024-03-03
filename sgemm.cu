@@ -89,7 +89,7 @@ __global__ void mySgemmV1Aligned(
                 for (int n = 0; n < TN; n++) {
                     int comp_a_smem_m = ty * TM + m;
                     int comp_b_smem_n = tx * TN + n;
-                    r_c[m][n] += s_a[comp_a_smem_m][k] * s_b[k][comp_b_smem_n];
+                    r_c[m][n] += s_a[comp_a_smem_m][k] * s_b[k][comp_b_smem_n]; // r_c是外积之和
                 }
             }
         }
