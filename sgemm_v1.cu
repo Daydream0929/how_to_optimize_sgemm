@@ -5,6 +5,8 @@ zhihu: https://zhuanlan.zhihu.com/p/435908830
 
 #include <cstdio>
 #include "assert.h"
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
 
 #define OFFSET(row, col, ld) ((row) * (ld) + (col))
 
@@ -206,7 +208,7 @@ int main(int argc, char** argv)
     float* h_C  = (float*)malloc(bytes_C);
     float* h_C1 = (float*)malloc(bytes_C);
 
-    float* d_A, d_B, d_C;
+    float *d_A, *d_B, *d_C;
     CHECK(cudaMalloc((void**)&d_A, bytes_A));
     CHECK(cudaMalloc((void**)&d_B, bytes_B));
     CHECK(cudaMalloc((void**)&d_C, bytes_C));
@@ -215,11 +217,91 @@ int main(int argc, char** argv)
     double gigaFlops[2] = {0, 0};
     double flopsPerMatrixMul = 2.0 * M * N * K;
 
-    const int BLOCK_SIZE_M  = 128;
-    const int BLOCK_SIZE_K  = 128;
-    const int BLOCK_SIZE_N  = 128;
-    const int THREAD_SIZE_X = 128;
-    const int THREAD_SIZE_Y  = 128;
-    const int BLOCK_SIZE_M  = 128;
+    const int BLOCK_SIZE_M          = 128;
+    const int BLOCK_SIZE_K          = 8;
+    const int BLOCK_SIZE_N          = 128;
+    const int THREAD_SIZE_X         = 8;
+    const int THREAD_SIZE_Y         = 8;
+    const bool ENABLE_DOUBLE_BUFFER = false;
 
+    // generate A and B
+    for (int i = 0; i < M * K; i ++) {
+        h_A[i] = i % 13;
+    }
+    for (int i = 0; i < K * N; i ++) {
+        h_B[i] = i % 13;
+    }
+    CHECK(cudaMemcpy(d_A, h_A, bytes_A, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_B, h_B, bytes_B, cudaMemcpyHostToDevice));
+
+    cudaEvent_t start, end;
+    CHECK(cudaEventCreate(&start));
+    CHECK(cudaEventCreate(&end));
+    float msec_total = 0;
+    int n_iter = 1000;
+
+    CHECK(cudaMemcpy(d_C, h_C, bytes_C, cudaMemcpyHostToDevice));
+    CHECK(cudaEventRecord(start));
+
+    for (int run = 0; run < n_iter; run ++) {
+
+    }
+    CHECK(cudaEventRecord(end));
+    CHECK(cudaEventSynchronize(end));
+    CHECK(cudaEventElapsedTime(&msec_total, start, end));
+
+    CHECK(cudaMemcpy(h_C, d_C, bytes_C, cudaMemcpyDeviceToHost));
+    msecPerMatrixMul[0] = msec_total / n_iter;
+    gigaFlops[0] = (flopsPerMatrixMul * 1.0e-9) / (msecPerMatrixMul[0] / 1000.0f);
+    printf( "My gemm Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,\n", gigaFlops[0], msecPerMatrixMul[0], flopsPerMatrixMul);
+
+    // cublas
+    cublasHandle_t blas_handle;
+    cublasCreate(&blas_handle);
+    float alpha = 1.0, beta = 0.0f;
+    CHECK(cudaMemcpy(d_C, h_C, bytes_C, cudaMemcpyHostToDevice));
+    CHECK(cudaEventRecord(start));
+    for (int run = 0; run < n_iter; run ++) {
+        cublasSgemm(blas_handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, d_A, K, d_B, N, &beta, d_C, N);
+    }
+    CHECK(cudaEventRecord(end));
+    CHECK(cudaEventSynchronize(end));
+    CHECK(cudaEventElapsedTime(&msec_total, start, end));
+
+    CHECK(cudaMemcpy(h_C1, d_C, bytes_C, cudaMemcpyDeviceToHost));
+    msecPerMatrixMul[1] = msec_total / n_iter;
+    gigaFlops[1] = (flopsPerMatrixMul * 1.0e-9) / (msecPerMatrixMul[0] / 1000.0f);
+    printf( "Cublas Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,\n", gigaFlops[1], msecPerMatrixMul[1], flopsPerMatrixMul);
+
+    cublasDestroy(blas_handle);
+
+    double eps = 1.e-6;  // machine zero
+    bool correct = true;
+    for (int i = 0; i < M * N; i++) {
+        int row = i / N;
+        int col = i % N;
+        double abs_err = fabs(h_C[i] - h_C1[col * M + row]);
+        double dot_length = M;
+        double abs_val = fabs(h_C[i]);
+        double rel_err = abs_err / abs_val / dot_length;
+        if (rel_err > eps) {
+            printf("Error! Matrix[%05d]=%.8f, ref=%.8f error term is > %E\n",
+                    i, h_C[i], h_C1[col * M + row], eps);
+            correct = false;
+            break;
+        }
+    }
+
+    printf("%s\n", correct ? "Result= PASS" : "Result= FAIL");
+    printf("ratio= %f\n", gigaFlops[0] / gigaFlops[1]);
+
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    free(h_A);
+    free(h_B);
+    free(h_C);
+    free(h_C1);
+
+    return 0;
 }
